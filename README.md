@@ -103,42 +103,44 @@ Secure Storage supports traditional relational database storage for cases where 
 
 In this sample, the relational database information is separated into several files:
 
-- `src/use/database.ts` - handles the overall database schema
-- `src/use/tasting-notes-database.ts` - handles the Tasting Notes related CRUD operations
-- `src/use/tea-categories-database.ts` - handles the Tea Category related CRUD operations
+- `src/core/DatabaseProvider.tsx` - handles the overall database schema
+- `src/core/TastingNotesDbProvider.tsx` - handles the Tasting Notes related CRUD operations
+- `src/use/TeaCategoriesDbProvider.tsx` - handles the Tea Category related CRUD operations
 
-The `src/use/database.ts` file exports one main function called `getHandle()`. This function opens and initializes the database if it is not already open and returns then returns a handle to the database. If the database is already open, then the handle i just returned:
+The `src/core/Database.tsx` file exports one main function in the provider called `getDb()`. This function opens and initializes the database if it is not already open and returns then returns a handle to the database. If the database is already open, then the db is just returned:
 
 ```typescript
-const getHandle = async (): Promise<SQLiteObject | null> => {
-  if (!handle) {
-    handle = await openDatabase();
-    if (handle) {
-      handle.transaction((tx) => createTables(tx));
-    }
-  }
-  return handle;
-};
+const getDb = async (): Promise<SQLiteObject | undefined> => {
+  if (db == undefined) {
+    const newDb = await initializeDB();
+    if (newDb !== undefined) return newDb
+  } 
+  return db
+}
 ```
 
 This allows the CRUD operations to be written in a manner that avoids race conditions:
 
 ```typescript
-const upsert = async (cat: TeaCategory): Promise<void> => {
-  const handle = await getHandle();
-  if (handle) {
-    await handle.transaction((tx) => {
-      tx.executeSql(
-        'INSERT INTO TeaCategories (id, name, description) VALUES (?, ?, ?)' +
-          ' ON CONFLICT(id) DO' +
-          ' UPDATE SET name = ?, description = ? where id = ?',
-        [cat.id, cat.name, cat.description, cat.name, cat.description, cat.id],
-        () => {
-          null;
+const upsertCategory = async (cat: Tea): Promise<void> => {
+    const handle = await getDb();
+    if (handle) {
+        try {
+            await handle.transaction((tx) => {
+                tx.executeSql(
+                    'INSERT INTO TeaCategories (id, name, description) VALUES (?, ?, ?)' +
+                    ' ON CONFLICT(id) DO' +
+                    ' UPDATE SET name = ?, description = ? where id = ?',
+                    [cat.id, cat.name, cat.description, cat.name, cat.description, cat.id],
+                    () => {
+                        null;
+                    }
+                );
+            });
+        } catch (e) {
+            console.log(e)
         }
-      );
-    });
-  }
+    }
 };
 ```
 
@@ -168,36 +170,33 @@ The web application cannot take advantage of the relational database. As such, i
 
 ### Sync
 
-Since all operations in a mobile context are run against the database, we need a way to sync the database with the Restful API. This sample application uses a very simple sync mechanism that could easily be expanded upon if need be. See `/src/use/sync.ts` for details.
+Since all operations in a mobile context are run against the database, we need a way to sync the database with the Restful API. This sample application uses a very simple sync mechanism that could easily be expanded upon if need be. See `/src/core/TeaProvider.tsx` for details.
 
 In this application, the only data that can be changed is the tasting notes. As such, it has the most complicated sync operation:
 
 ```typescript
-const syncTastingNotes = async (): Promise<void> => {
-  const { getAll, reset } = useTastingNotesDatabase();
-  const { remove, save } = useTastingNotesAPI();
-  const { load: loadTastingNotes } = useTastingNotes();
+const syncTeas = async (): Promise<void> => {
+    const notes = await getAll(true);
+    const calls: Array<Promise<any>> = [];
 
-  const notes = await getAll(true);
+    notes.forEach((note: Tea) => {
+        if (note.syncStatus === 'UPDATE') {
+            calls.push(saveAPI(note));
+        }
+        if (note.syncStatus === 'INSERT') {
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            const { id, ...n } = note;
+            calls.push(saveAPI(n));
+        }
+        if (note.syncStatus === 'DELETE') {
+            calls.push(removeAPI(note));
+        }
+    });
 
-  const calls: Array<Promise<any>> = [];
-  notes.forEach((note: TastingNote) => {
-    if (note.syncStatus === 'UPDATE') {
-      calls.push(save(note));
-    }
-    if (note.syncStatus === 'INSERT') {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { id, ...n } = note;
-      calls.push(save(n));
-    }
-    if (note.syncStatus === 'DELETE') {
-      calls.push(remove(note));
-    }
-  });
-  await Promise.all(calls);
-  await reset();
-  await loadTastingNotes();
-};
+    await Promise.all(calls);
+    await reset();
+    await loadTastingNotes();
+}
 ```
 
 The order of operations is:
